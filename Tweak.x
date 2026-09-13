@@ -6,6 +6,7 @@
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <notify.h>
+#include <sys/sysctl.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -362,6 +363,90 @@ static NSData *base64_decode(NSString *input) {
     return result;
 }
 
+static NSString *realDeviceSerial(void) {
+    io_service_t platformExpert = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
+    if (!platformExpert) return @"0";
+    CFStringRef serialCf = (CFStringRef)IORegistryEntryCreateCFProperty(platformExpert, CFSTR(kIOPlatformSerialNumberKey), kCFAllocatorDefault, 0);
+    IOObjectRelease(platformExpert);
+    NSString *serial = CFBridgingRelease(serialCf);
+    return serial.length ? serial : @"0";
+}
+
+static NSString *realDeviceName(void) {
+    NSString *name = [UIDevice currentDevice].name;
+    return name.length ? name : @"iPhone";
+}
+
+static NSString *realDeviceModel(void) {
+    size_t length = 0;
+    if (sysctlbyname("hw.machine", NULL, &length, NULL, 0) != 0 || length == 0) return nil;
+    char *model = calloc(length, sizeof(char));
+    if (!model) return nil;
+    BOOL success = sysctlbyname("hw.machine", model, &length, NULL, 0) == 0;
+    NSString *result = success ? [NSString stringWithUTF8String:model] : nil;
+    free(model);
+    return result;
+}
+
+static NSString *dynamicClientInfo(void) {
+    NSString *systemVersion = [UIDevice currentDevice].systemVersion;
+    if (!systemVersion.length) systemVersion = @"6.1.3";
+    NSString *claimedVersion = [systemVersion compare:@"8.0" options:NSNumericSearch] == NSOrderedAscending
+        ? [@"8." stringByAppendingString:systemVersion]
+        : systemVersion;
+    NSString *model = realDeviceModel() ?: @"iPod1,1";
+    if ([model hasPrefix:@"iPhone"]) model = @"iPod1,1";
+    return [NSString stringWithFormat:@"<%@> <iPhone OS;%@;12A365> <com.apple.AuthKit/1 (com.apple.akd/1.0)>", model, claimedVersion];
+}
+
+static void postDeviceLiveness(NSString *adsid, NSString *hbToken, NSDictionary *cpd) {
+    if (!adsid || !hbToken) {
+        NSLog(@"[GSAPort][%@] liveness skipped: heartbeat token was unavailable", GSAPortProcessName());
+        return;
+    }
+
+    NSString *hbIdentity = base64_encode([[NSString stringWithFormat:@"%@:%@", adsid, hbToken] dataUsingEncoding:NSUTF8StringEncoding]);
+    NSDictionary *bodyDict = @{
+        @"Header": @{},
+        @"Request": @{
+            @"cdpStatus": @NO,
+            @"cfuids": @[],
+            @"circleStatus": @NO,
+            @"clbg": @"0",
+            @"clcg": @"1",
+            @"clhs": @"1",
+            @"dc": @"1",
+            @"dec": @"1",
+            @"dn": realDeviceName(),
+            @"event": @"liveness",
+            @"loc": @"en_US",
+            @"prkgen": @YES,
+            @"rep": @0,
+            @"services": @[@"icloud"],
+            @"sn": realDeviceSerial(),
+            @"ut": @1,
+            @"ptkn": @"850EB79D50493E4E9EF889B13A09FCD3E4B4DEAA34C10080A8BAF799276CAAF3",
+        },
+    };
+    NSData *body = [NSPropertyListSerialization dataWithPropertyList:bodyDict format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+    if (!body) return;
+
+    NSMutableURLRequest *liveReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gsas.apple.com/grandslam/GsService2/postdata"]];
+    [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:liveReq];
+    liveReq.HTTPMethod = @"POST";
+    liveReq.HTTPBody = body;
+    [liveReq setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    [liveReq setValue:@"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0" forHTTPHeaderField:@"User-Agent"];
+    [liveReq setValue:hbIdentity forHTTPHeaderField:@"X-Apple-HB-Token"];
+    [liveReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
+    for (NSString *key in cpd) [liveReq setValue:cpd[key] forHTTPHeaderField:key];
+
+    NSURLResponse *liveResponse = nil;
+    NSError *liveError = nil;
+    [NSURLConnection sendSynchronousRequest:liveReq returningResponse:&liveResponse error:&liveError];
+    NSLog(@"[GSAPort][%@] device liveness returned HTTP %ld", GSAPortProcessName(), (long)((NSHTTPURLResponse *)liveResponse).statusCode);
+}
+
 static NSDictionary *fetchAnisetteFresh(void) {
     io_service_t platformExpert = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
     CFStringRef uuidCf = (CFStringRef)IORegistryEntryCreateCFProperty(platformExpert, CFSTR(kIOPlatformUUIDKey), kCFAllocatorDefault, 0);
@@ -392,12 +477,20 @@ static NSDictionary *fetchAnisetteFresh(void) {
     NSMutableURLRequest *anisetteReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://icloud.podpod123.com/anisette.php"]];
     [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:anisetteReq];
     [anisetteReq setValue:deviceUuid forHTTPHeaderField:@"X-Device-Uuid"];
+    [anisetteReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-GSAPort-Client-Info"];
     [anisetteReq setValue:pk forHTTPHeaderField:@"pk"];
     [anisetteReq setValue:podkey forHTTPHeaderField:@"podkey"];
     NSURLResponse *anisetteResponse = nil;
     NSError *anisetteError = nil;
     NSData *anisetteData = [NSURLConnection sendSynchronousRequest:anisetteReq returningResponse:&anisetteResponse error:&anisetteError];
-    return (anisetteData && !anisetteError) ? [NSJSONSerialization JSONObjectWithData:anisetteData options:0 error:nil] : nil;
+    NSDictionary *anisetteJson = (anisetteData && !anisetteError) ? [NSJSONSerialization JSONObjectWithData:anisetteData options:0 error:nil] : nil;
+    if (anisetteJson) {
+        NSMutableDictionary *anisetteMutable = [anisetteJson mutableCopy];
+        anisetteMutable[@"X-Apple-I-SRL-NO"] = realDeviceSerial();
+        anisetteMutable[@"X-MMe-Client-Info"] = dynamicClientInfo();
+        return anisetteMutable;
+    }
+    return nil;
 }
 
 static NSDictionary *fetchAnisetteCached(void) {
@@ -748,7 +841,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             [submitReq setValue:@"com.apple.gs.xcode.auth" forHTTPHeaderField:@"X-Apple-App-Info"];
             [submitReq setValue:@"11.2 (11B41)" forHTTPHeaderField:@"X-Xcode-Version"];
             [submitReq setValue:trailingCode forHTTPHeaderField:@"security-code"];
-            [submitReq setValue:@"<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>" forHTTPHeaderField:@"X-Mme-Client-Info"];
+            [submitReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
             if (submitCpd) { for (NSString *key in submitCpd) [submitReq setValue:submitCpd[key] forHTTPHeaderField:key]; }
             NSURLResponse *submitResponse = nil;
             NSError *submitError = nil;
@@ -789,7 +882,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         [initReq setValue:@"text/x-xml-plist" forHTTPHeaderField:@"Content-Type"];
         [initReq setValue:@"*/*" forHTTPHeaderField:@"Accept"];
         [initReq setValue:@"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0" forHTTPHeaderField:@"User-Agent"];
-        [initReq setValue:@"<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>" forHTTPHeaderField:@"X-Mme-Client-Info"];
+        [initReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
         [initReq setValue:cpd[@"X-Apple-I-MD-M"] forHTTPHeaderField:@"X-Apple-I-MD-M"];
         [initReq setValue:cpd[@"X-Mme-Device-Id"] forHTTPHeaderField:@"X-Mme-Device-Id"];
         NSURLResponse *initResponse = nil;
@@ -850,7 +943,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         [completeReq setValue:@"text/x-xml-plist" forHTTPHeaderField:@"Content-Type"];
         [completeReq setValue:@"*/*" forHTTPHeaderField:@"Accept"];
         [completeReq setValue:@"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0" forHTTPHeaderField:@"User-Agent"];
-        [completeReq setValue:@"<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>" forHTTPHeaderField:@"X-Mme-Client-Info"];
+        [completeReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
         [completeReq setValue:cpdComplete[@"X-Apple-I-MD-M"] forHTTPHeaderField:@"X-Apple-I-MD-M"];
         [completeReq setValue:cpdComplete[@"X-Mme-Device-Id"] forHTTPHeaderField:@"X-Mme-Device-Id"];
         NSURLResponse *completeResponse = nil;
@@ -937,7 +1030,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 [triggerReq setValue:identityToken2fa forHTTPHeaderField:@"X-Apple-Identity-Token"];
                 [triggerReq setValue:@"com.apple.gs.xcode.auth" forHTTPHeaderField:@"X-Apple-App-Info"];
                 [triggerReq setValue:@"11.2 (11B41)" forHTTPHeaderField:@"X-Xcode-Version"];
-                [triggerReq setValue:@"<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>" forHTTPHeaderField:@"X-Mme-Client-Info"];
+                [triggerReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
                 if (triggerCpd) { for (NSString *key in triggerCpd) [triggerReq setValue:triggerCpd[key] forHTTPHeaderField:key]; }
                 NSURLResponse *triggerResponse = nil;
                 NSError *triggerError = nil;
@@ -965,6 +1058,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 
         NSString *pet = spd[@"t"][@"com.apple.gs.idms.pet"][@"token"];
         NSString *adsid = spd[@"adsid"];
+        NSString *hbToken = spd[@"t"][@"com.apple.gs.idms.hb"][@"token"];
+        if (isICloudLogin) postDeviceLiveness(adsid, hbToken, fetchAnisetteFresh());
 
         if (isBrokenAuthenticateURL) {
             NSString *identityFix = base64_encode([[NSString stringWithFormat:@"%@:%@", username, pet] dataUsingEncoding:NSUTF8StringEncoding]);
