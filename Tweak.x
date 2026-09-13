@@ -921,8 +921,6 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         NSInteger hsc = [statusDict[@"hsc"] integerValue];
 
         if (hsc != 200) {
-            NSString *au = statusDict[@"au"];
-            if ([au isEqualToString:@"trustedDeviceSecondaryAuth"] || [au isEqualToString:@"secondaryAuth"]) {
                 NSString *dsid2fa = spd[@"adsid"];
                 NSString *idmsToken2fa = spd[@"GsIdmsToken"];
                 NSString *combined2fa = [NSString stringWithFormat:@"%@:%@", dsid2fa, idmsToken2fa];
@@ -958,7 +956,6 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 trailingCode = enteredCode;
                 NSLog(@"[GSAPort][%@] verification-code prompt submitted; validating and resuming sign-in", GSAPortProcessName());
                 goto retryAfterCodePrompt;
-            }
 
             NSHTTPURLResponse *failResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
             [self.client URLProtocol:self didReceiveResponse:failResponse cacheStoragePolicy:NSURLCacheStorageNotAllowed];
