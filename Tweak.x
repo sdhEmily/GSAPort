@@ -447,7 +447,8 @@ static void postDeviceLiveness(NSString *adsid, NSString *hbToken, NSDictionary 
     NSLog(@"[GSAPort][%@] device liveness returned HTTP %ld", GSAPortProcessName(), (long)((NSHTTPURLResponse *)liveResponse).statusCode);
 }
 
-static NSDictionary *fetchAnisetteFresh(void) {
+static NSDictionary *fetchAnisetteFreshWithFreshIdentity(BOOL *freshIdentity) {
+    if (freshIdentity) *freshIdentity = NO;
     io_service_t platformExpert = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
     CFStringRef uuidCf = (CFStringRef)IORegistryEntryCreateCFProperty(platformExpert, CFSTR(kIOPlatformUUIDKey), kCFAllocatorDefault, 0);
     NSString *deviceUuid = (__bridge_transfer NSString *)uuidCf;
@@ -485,12 +486,20 @@ static NSDictionary *fetchAnisetteFresh(void) {
     NSData *anisetteData = [NSURLConnection sendSynchronousRequest:anisetteReq returningResponse:&anisetteResponse error:&anisetteError];
     NSDictionary *anisetteJson = (anisetteData && !anisetteError) ? [NSJSONSerialization JSONObjectWithData:anisetteData options:0 error:nil] : nil;
     if (anisetteJson) {
+        NSHTTPURLResponse *anisetteHTTPResponse = (NSHTTPURLResponse *)anisetteResponse;
+        if (freshIdentity && [[anisetteHTTPResponse.allHeaderFields objectForKey:@"X-GSAPort-Fresh-Identity"] isEqualToString:@"1"]) {
+            *freshIdentity = YES;
+        }
         NSMutableDictionary *anisetteMutable = [anisetteJson mutableCopy];
         anisetteMutable[@"X-Apple-I-SRL-NO"] = realDeviceSerial();
         anisetteMutable[@"X-MMe-Client-Info"] = dynamicClientInfo();
         return anisetteMutable;
     }
     return nil;
+}
+
+static NSDictionary *fetchAnisetteFresh(void) {
+    return fetchAnisetteFreshWithFreshIdentity(NULL);
 }
 
 static NSDictionary *fetchAnisetteCached(void) {
@@ -819,6 +828,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
     }
 
     NSString *realPassword = trailingCode ? pending[@"password"] : submittedPassword;
+    __block BOOL retriedFreshDeviceIdentity = NO;
 
     NSOperationQueue *queue = [[NSOperationQueue alloc] init];
     [queue addOperationWithBlock:^{
@@ -857,7 +867,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             [pendingTwoFactor removeObjectForKey:username];
         }
 
-        NSDictionary *cpd = fetchAnisetteFresh();
+        BOOL freshDeviceIdentity = NO;
+        NSDictionary *cpd = fetchAnisetteFreshWithFreshIdentity(&freshDeviceIdentity);
 
         if (!cpd) {
             NSHTTPURLResponse *failResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
@@ -959,9 +970,22 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             return;
         }
 
+        NSDictionary *statusDict = completeResp[@"Status"];
+        NSInteger hsc = [statusDict[@"hsc"] integerValue];
+        NSInteger errorCode = [statusDict[@"ec"] integerValue];
         NSData *m2Data = completeResp[@"M2"];
         if (!m2Data) {
             srp_user_delete(usr);
+            // A freshly provisioned identity is registered by Apple's first
+            // attempt, which returns -80044 without an SRP payload or the
+            // short-lived GsIdmsToken needed for /validate. Retry it once;
+            // the normal secondary-auth response then provides that token and
+            // falls through to the trusted-device -> validate flow below.
+            if (!trailingCode && freshDeviceIdentity && !retriedFreshDeviceIdentity && hsc == 500 && errorCode == -80044) {
+                retriedFreshDeviceIdentity = YES;
+                NSLog(@"[GSAPort][%@] fresh identity registered; retrying to request verification", GSAPortProcessName());
+                goto retryAfterCodePrompt;
+            }
             NSHTTPURLResponse *failResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
             [self.client URLProtocol:self didReceiveResponse:failResponse cacheStoragePolicy:NSURLCacheStorageNotAllowed];
             [self.client URLProtocolDidFinishLoading:self];
@@ -1009,9 +1033,6 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             [self.client URLProtocolDidFinishLoading:self];
             return;
         }
-
-        NSDictionary *statusDict = completeResp[@"Status"];
-        NSInteger hsc = [statusDict[@"hsc"] integerValue];
 
         if (hsc != 200) {
                 NSString *dsid2fa = spd[@"adsid"];
