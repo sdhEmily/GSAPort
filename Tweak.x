@@ -1,9 +1,11 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonCrypto.h>
 #import <IOKit/IOKitLib.h>
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
+#include <notify.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -245,6 +247,66 @@ static void srp_user_delete(struct SRPUser *usr) {
 }
 
 static NSMutableDictionary *pendingTwoFactor = nil;
+static const char *twoFactorPromptNotification = "com.podpod123.gsaport.twofactor-prompt";
+static const char *twoFactorCodeNotification = "com.podpod123.gsaport.twofactor-code";
+static int twoFactorPromptNotificationToken = 0;
+static int twoFactorCodeNotificationToken = 0;
+
+static NSString *GSAPortProcessName(void) {
+    return [[NSProcessInfo processInfo] processName] ?: @"unknown";
+}
+
+@interface GSAPortTwoFactorPrompt : NSObject <UIAlertViewDelegate>
+@end
+
+static GSAPortTwoFactorPrompt *activeTwoFactorPrompt = nil;
+
+@implementation GSAPortTwoFactorPrompt
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (buttonIndex != alertView.cancelButtonIndex) {
+        NSString *code = [alertView textFieldAtIndex:0].text;
+        if (code.length == 6 && [code rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location == NSNotFound) {
+            notify_set_state(twoFactorCodeNotificationToken, code.longLongValue);
+            notify_post(twoFactorCodeNotification);
+            NSLog(@"[GSAPort][%@] verification code submitted from alert", GSAPortProcessName());
+        }
+    }
+    activeTwoFactorPrompt = nil;
+}
+@end
+
+static void showVerificationCodePrompt(void) {
+    GSAPortTwoFactorPrompt *prompt = [GSAPortTwoFactorPrompt new];
+    activeTwoFactorPrompt = prompt;
+    UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Apple ID Verification Code"
+                                                    message:@"Enter the verification code sent to your other devices."
+                                                   delegate:prompt
+                                          cancelButtonTitle:@"Cancel"
+                                          otherButtonTitles:@"Verify", nil];
+    alert.alertViewStyle = UIAlertViewStylePlainTextInput;
+    UITextField *codeField = [alert textFieldAtIndex:0];
+    codeField.placeholder = @"Verification Code";
+    codeField.keyboardType = UIKeyboardTypeNumberPad;
+    [alert show];
+    NSLog(@"[GSAPort][%@] displayed SpringBoard verification-code prompt", GSAPortProcessName());
+}
+
+static NSString *presentVerificationCodePrompt(void) {
+    __block NSString *code = nil;
+    dispatch_semaphore_t completion = dispatch_semaphore_create(0);
+    int token = 0;
+    notify_register_dispatch(twoFactorCodeNotification, &token, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(int notificationToken) {
+        uint64_t state = 0;
+        notify_get_state(notificationToken, &state);
+        if (state > 0) code = [NSString stringWithFormat:@"%06llu", state];
+        dispatch_semaphore_signal(completion);
+    });
+    NSLog(@"[GSAPort][%@] requesting SpringBoard verification-code prompt", GSAPortProcessName());
+    notify_post(twoFactorPromptNotification);
+    dispatch_semaphore_wait(completion, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+    notify_cancel(token);
+    return code;
+}
 static NSDictionary *cachedAnisette = nil;
 static NSTimeInterval cachedAnisetteFetchedAt = 0;
 
@@ -658,7 +720,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
     }
 
     NSDictionary *pending = pendingTwoFactor[username];
-    NSString *trailingCode = nil;
+    __block NSString *trailingCode = nil;
     if (pending && submittedPassword.length == 6 && [submittedPassword rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location == NSNotFound) {
         trailingCode = submittedPassword;
     }
@@ -668,6 +730,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
     NSOperationQueue *queue = [[NSOperationQueue alloc] init];
     [queue addOperationWithBlock:^{
 
+    retryAfterCodePrompt:
         if (trailingCode) {
             NSDictionary *pend = pendingTwoFactor[username];
             NSString *combined = [NSString stringWithFormat:@"%@:%@", pend[@"dsid"], pend[@"idmsToken"]];
@@ -883,10 +946,18 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 [NSURLConnection sendSynchronousRequest:triggerReq returningResponse:&triggerResponse error:&triggerError];
 
                 pendingTwoFactor[username] = @{@"password": realPassword, @"dsid": dsid2fa ?: @"", @"idmsToken": idmsToken2fa ?: @""};
-                NSHTTPURLResponse *needCodeResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
-                [self.client URLProtocol:self didReceiveResponse:needCodeResponse cacheStoragePolicy:NSURLCacheStorageNotAllowed];
-                [self.client URLProtocolDidFinishLoading:self];
-                return;
+                NSString *enteredCode = presentVerificationCodePrompt();
+                NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+                if (enteredCode.length != 6 || [enteredCode rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
+                    NSLog(@"[GSAPort][%@] verification-code prompt was cancelled or invalid", GSAPortProcessName());
+                    NSHTTPURLResponse *failResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
+                    [self.client URLProtocol:self didReceiveResponse:failResponse cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+                    [self.client URLProtocolDidFinishLoading:self];
+                    return;
+                }
+                trailingCode = enteredCode;
+                NSLog(@"[GSAPort][%@] verification-code prompt submitted; validating and resuming sign-in", GSAPortProcessName());
+                goto retryAfterCodePrompt;
             }
 
             NSHTTPURLResponse *failResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
@@ -1187,4 +1258,12 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 
 %ctor {
     [NSURLProtocol registerClass:[GSAPortProtocol class]];
+    NSLog(@"[GSAPort][%@] loaded", GSAPortProcessName());
+    if ([GSAPortProcessName() isEqualToString:@"SpringBoard"]) {
+        notify_register_check(twoFactorCodeNotification, &twoFactorCodeNotificationToken);
+        notify_register_dispatch(twoFactorPromptNotification, &twoFactorPromptNotificationToken, dispatch_get_main_queue(), ^(int token) {
+            showVerificationCodePrompt();
+        });
+        NSLog(@"[GSAPort][SpringBoard] registered verification-code prompt observer");
+    }
 }

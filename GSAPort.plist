@@ -7,12 +7,14 @@
         <key>Bundles</key>
         <array>
             <string>com.apple.Preferences</string>
+	    <string>com.apple.springboard</string>
 	    <string>com.apple.mobileme.fmip1</string>
 	    <string>com.apple.mobileme.fmf1</string>
         </array>
         <key>Executables</key>
         <array>
             <string>accountsd</string>
+	    <string>SpringBoard</string>
 	    <string>gamed</string>
         </array>
     </dict>
