@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonCrypto.h>
 #import <IOKit/IOKitLib.h>
+#import <objc/runtime.h>
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
@@ -622,12 +623,15 @@ static NSDictionary *fetchAnisetteFreshWithFreshIdentity(BOOL *freshIdentity) {
     NSMutableString *pk = [NSMutableString string];
     for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) [pk appendFormat:@"%02x", pkBytes[i]];
 
-    NSMutableURLRequest *anisetteReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"icloud.podpod123.com/anisette.php"]];
+    NSMutableURLRequest *anisetteReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://icloud.podpod123.com/anisette.php"]];
     // Anisette headers contain a short-lived timestamp and must be fetched for
     // every authentication attempt.  Do not let CFNetwork satisfy this from
     // its URL cache (which also hides the request from a configured proxy).
     [anisetteReq setCachePolicy:NSURLRequestReloadIgnoringLocalCacheData];
     [anisetteReq setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+    // Keep the request shape identical when it is issued by accountsd; the
+    // deployment's edge rule accepts GSAPort's Settings client identity.
+    [anisetteReq setValue:@"Settings/1.0 CFNetwork/609.1.4 Darwin/13.0.0" forHTTPHeaderField:@"User-Agent"];
     [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:anisetteReq];
     [anisetteReq setValue:deviceUuid forHTTPHeaderField:@"X-Device-Uuid"];
     [anisetteReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-GSAPort-Client-Info"];
@@ -635,12 +639,9 @@ static NSDictionary *fetchAnisetteFreshWithFreshIdentity(BOOL *freshIdentity) {
     [anisetteReq setValue:podkey forHTTPHeaderField:@"podkey"];
     NSURLResponse *anisetteResponse = nil;
     NSError *anisetteError = nil;
-    NSLog(@"[GSAPort][%@] anisette fetch starting host=icloud.sdh.gay uuid-present=%@", GSAPortProcessName(), deviceUuid.length ? @"YES" : @"NO");
     NSData *anisetteData = [NSURLConnection sendSynchronousRequest:anisetteReq returningResponse:&anisetteResponse error:&anisetteError];
     NSHTTPURLResponse *anisetteHTTPResponse = (NSHTTPURLResponse *)anisetteResponse;
-    NSLog(@"[GSAPort][%@] anisette fetch finished bytes=%lu status=%ld error=%@", GSAPortProcessName(), (unsigned long)anisetteData.length, (long)anisetteHTTPResponse.statusCode, anisetteError.localizedDescription ?: @"none");
     NSDictionary *anisetteJson = (anisetteData && !anisetteError) ? [NSJSONSerialization JSONObjectWithData:anisetteData options:0 error:nil] : nil;
-    NSLog(@"[GSAPort][%@] anisette JSON %@", GSAPortProcessName(), anisetteJson ? @"parsed" : @"missing/invalid");
     if (anisetteJson) {
         if (freshIdentity && [[anisetteHTTPResponse.allHeaderFields objectForKey:@"X-GSAPort-Fresh-Identity"] isEqualToString:@"1"]) {
             *freshIdentity = YES;
@@ -710,7 +711,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         if ([path isEqualToString:@"/setup/login_or_create_account"]) return YES;
         if ([path isEqualToString:@"/setup/iosbuddy/loginDelegates"]) return YES;
         if ([path isEqualToString:@"/setup/get_account_settings"]) return YES;
-        if ([path isEqualToString:@"/setup/authenticate/$APPLE_ID$"]) return YES;
+        if ([path isEqualToString:@"/setup/authenticate/$APPLE_ID$"] ||
+            [path isEqualToString:@"/setup/fmipauthenticate/$APPLE_ID$"]) return YES;
     }
     if ([host isEqualToString:@"profile.ess.apple.com"] && [path isEqualToString:@"/WebObjects/VCProfileService.woa/wa/authenticateUser"]) return YES;
     if ([host isEqualToString:@"profile.gc.apple.com"] && [path isEqualToString:@"/WebObjects/GKProfileService.woa/wa/authenticateUser"]) return YES;
@@ -755,7 +757,9 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
     BOOL isFMIPGeneric = [host hasSuffix:@"fmipmobile.icloud.com"] && !isFMIPInit;
     BOOL isFMFGeneric = [host hasSuffix:@"fmfmobile.icloud.com"];
     BOOL isAccountSettingsDirect = [host isEqualToString:@"setup.icloud.com"] && [path isEqualToString:@"/setup/get_account_settings"];
-    BOOL isBrokenAuthenticateURL = [host isEqualToString:@"setup.icloud.com"] && [path isEqualToString:@"/setup/authenticate/$APPLE_ID$"];
+    BOOL isBrokenAuthenticateURL = [host isEqualToString:@"setup.icloud.com"] &&
+        ([path isEqualToString:@"/setup/authenticate/$APPLE_ID$"] ||
+         [path isEqualToString:@"/setup/fmipauthenticate/$APPLE_ID$"]);
 
     if (isFMFGeneric) {
         NSOperationQueue *fmfQueue = [[NSOperationQueue alloc] init];
@@ -1328,7 +1332,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 
         if (isBrokenAuthenticateURL) {
             NSString *identityFix = base64_encode([[NSString stringWithFormat:@"%@:%@", username, pet] dataUsingEncoding:NSUTF8StringEncoding]);
-            NSMutableURLRequest *authReqFix = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://setup.icloud.com/setup/authenticate/%@", username]]];
+            NSString *authenticationService = [path hasPrefix:@"/setup/fmipauthenticate/"] ? @"fmipauthenticate" : @"authenticate";
+            NSMutableURLRequest *authReqFix = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://setup.icloud.com/setup/%@/%@", authenticationService, username]]];
             [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:authReqFix];
             [authReqFix setValue:[NSString stringWithFormat:@"Basic %@", identityFix] forHTTPHeaderField:@"Authorization"];
 
@@ -1612,6 +1617,88 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 }
 
 @end
+
+static char gsaportSessionTaskContextKey;
+
+static BOOL isGSAPortAccountsSessionRequest(NSURLRequest *request) {
+    return [request.URL.host isEqualToString:@"setup.icloud.com"] &&
+        [request.URL.path isEqualToString:@"/setup/iosbuddy/loginDelegates"];
+}
+
+%hook NSURLSession
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    if ([GSAPortProcessName() isEqualToString:@"accountsd"] && completionHandler && isGSAPortAccountsSessionRequest(request)) {
+        // The shared NSURLSession used by accountsd ignores the global
+        // NSURLProtocol registry. Keep its original task, but divert its
+        // resume through NSURLConnection below.
+        NSURLSessionDataTask *task = %orig(request, nil);
+        NSDictionary *context = @{
+            @"request": [request copy],
+            @"completion": [completionHandler copy],
+            @"session": self,
+        };
+        objc_setAssociatedObject(task, &gsaportSessionTaskContextKey, context, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return task;
+    }
+    return %orig;
+}
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    if ([GSAPortProcessName() isEqualToString:@"accountsd"] && isGSAPortAccountsSessionRequest(request)) {
+        NSURLSessionDataTask *task = %orig;
+        NSDictionary *context = @{
+            @"request": [request copy],
+            @"session": self,
+        };
+        objc_setAssociatedObject(task, &gsaportSessionTaskContextKey, context, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return task;
+    }
+    return %orig;
+}
+%end
+
+%hook NSURLSessionTask
+- (void)resume {
+    NSDictionary *context = objc_getAssociatedObject(self, &gsaportSessionTaskContextKey);
+    if (!context) {
+        %orig;
+        return;
+    }
+    objc_setAssociatedObject(self, &gsaportSessionTaskContextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSURLRequest *request = context[@"request"];
+    void (^completion)(NSData *, NSURLResponse *, NSError *) = context[@"completion"];
+    NSURLSession *session = context[@"session"];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSURLResponse *response = nil;
+        NSError *error = nil;
+        NSData *data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
+        if (completion) {
+            completion(data, response, error);
+            return;
+        }
+
+        NSOperationQueue *queue = session.delegateQueue ?: [NSOperationQueue mainQueue];
+        [queue addOperationWithBlock:^{
+            id delegate = session.delegate;
+            void (^finish)(void) = ^{
+                if (data.length && [delegate respondsToSelector:@selector(URLSession:dataTask:didReceiveData:)]) {
+                    [(id <NSURLSessionDataDelegate>)delegate URLSession:session dataTask:(NSURLSessionDataTask *)self didReceiveData:data];
+                }
+                if ([delegate respondsToSelector:@selector(URLSession:task:didCompleteWithError:)]) {
+                    [(id <NSURLSessionTaskDelegate>)delegate URLSession:session task:self didCompleteWithError:error];
+                }
+            };
+            if (response && [delegate respondsToSelector:@selector(URLSession:dataTask:didReceiveResponse:completionHandler:)]) {
+                [(id <NSURLSessionDataDelegate>)delegate URLSession:session dataTask:(NSURLSessionDataTask *)self didReceiveResponse:response completionHandler:^(NSURLSessionResponseDisposition disposition) {
+                    finish();
+                }];
+            } else {
+                finish();
+            }
+        }];
+    });
+}
+%end
 
 %ctor {
     [NSURLProtocol registerClass:[GSAPortProtocol class]];
