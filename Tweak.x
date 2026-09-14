@@ -622,7 +622,12 @@ static NSDictionary *fetchAnisetteFreshWithFreshIdentity(BOOL *freshIdentity) {
     NSMutableString *pk = [NSMutableString string];
     for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) [pk appendFormat:@"%02x", pkBytes[i]];
 
-    NSMutableURLRequest *anisetteReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://icloud.podpod123.com/anisette.php"]];
+    NSMutableURLRequest *anisetteReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"icloud.podpod123.com/anisette.php"]];
+    // Anisette headers contain a short-lived timestamp and must be fetched for
+    // every authentication attempt.  Do not let CFNetwork satisfy this from
+    // its URL cache (which also hides the request from a configured proxy).
+    [anisetteReq setCachePolicy:NSURLRequestReloadIgnoringLocalCacheData];
+    [anisetteReq setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
     [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:anisetteReq];
     [anisetteReq setValue:deviceUuid forHTTPHeaderField:@"X-Device-Uuid"];
     [anisetteReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-GSAPort-Client-Info"];
@@ -630,10 +635,13 @@ static NSDictionary *fetchAnisetteFreshWithFreshIdentity(BOOL *freshIdentity) {
     [anisetteReq setValue:podkey forHTTPHeaderField:@"podkey"];
     NSURLResponse *anisetteResponse = nil;
     NSError *anisetteError = nil;
+    NSLog(@"[GSAPort][%@] anisette fetch starting host=icloud.sdh.gay uuid-present=%@", GSAPortProcessName(), deviceUuid.length ? @"YES" : @"NO");
     NSData *anisetteData = [NSURLConnection sendSynchronousRequest:anisetteReq returningResponse:&anisetteResponse error:&anisetteError];
+    NSHTTPURLResponse *anisetteHTTPResponse = (NSHTTPURLResponse *)anisetteResponse;
+    NSLog(@"[GSAPort][%@] anisette fetch finished bytes=%lu status=%ld error=%@", GSAPortProcessName(), (unsigned long)anisetteData.length, (long)anisetteHTTPResponse.statusCode, anisetteError.localizedDescription ?: @"none");
     NSDictionary *anisetteJson = (anisetteData && !anisetteError) ? [NSJSONSerialization JSONObjectWithData:anisetteData options:0 error:nil] : nil;
+    NSLog(@"[GSAPort][%@] anisette JSON %@", GSAPortProcessName(), anisetteJson ? @"parsed" : @"missing/invalid");
     if (anisetteJson) {
-        NSHTTPURLResponse *anisetteHTTPResponse = (NSHTTPURLResponse *)anisetteResponse;
         if (freshIdentity && [[anisetteHTTPResponse.allHeaderFields objectForKey:@"X-GSAPort-Fresh-Identity"] isEqualToString:@"1"]) {
             *freshIdentity = YES;
         }
