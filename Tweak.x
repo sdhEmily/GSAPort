@@ -7,6 +7,7 @@
 #include <openssl/rand.h>
 #include <notify.h>
 #include <sys/sysctl.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -250,8 +251,13 @@ static void srp_user_delete(struct SRPUser *usr) {
 static NSMutableDictionary *pendingTwoFactor = nil;
 static const char *twoFactorPromptNotification = "com.podpod123.gsaport.twofactor-prompt";
 static const char *twoFactorCodeNotification = "com.podpod123.gsaport.twofactor-code";
+static const char *twoFactorCancelNotification = "com.podpod123.gsaport.twofactor-cancel";
+static const char *twoFactorPromptDismissNotification = "com.podpod123.gsaport.twofactor-prompt-dismiss";
 static int twoFactorPromptNotificationToken = 0;
 static int twoFactorCodeNotificationToken = 0;
+static int twoFactorPromptDismissNotificationToken = 0;
+static const int64_t twoFactorPromptTimeoutSeconds = 30;
+static time_t suppressVerificationFailedUntil = 0;
 
 static NSString *GSAPortProcessName(void) {
     return [[NSProcessInfo processInfo] processName] ?: @"unknown";
@@ -261,10 +267,14 @@ static NSString *GSAPortProcessName(void) {
 @end
 
 static GSAPortTwoFactorPrompt *activeTwoFactorPrompt = nil;
+static UIAlertView *activeTwoFactorAlert = nil;
 
 @implementation GSAPortTwoFactorPrompt
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
-    if (buttonIndex != alertView.cancelButtonIndex) {
+    if (buttonIndex == alertView.cancelButtonIndex) {
+        notify_post(twoFactorCancelNotification);
+        NSLog(@"[GSAPort][%@] verification-code prompt cancelled", GSAPortProcessName());
+    } else {
         NSString *code = [alertView textFieldAtIndex:0].text;
         if (code.length == 6 && [code rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location == NSNotFound) {
             notify_set_state(twoFactorCodeNotificationToken, code.longLongValue);
@@ -272,9 +282,17 @@ static GSAPortTwoFactorPrompt *activeTwoFactorPrompt = nil;
             NSLog(@"[GSAPort][%@] verification code submitted from alert", GSAPortProcessName());
         }
     }
+    activeTwoFactorAlert = nil;
     activeTwoFactorPrompt = nil;
 }
 @end
+
+static void dismissVerificationCodePrompt(void) {
+    UIAlertView *prompt = activeTwoFactorAlert;
+    if (prompt) [prompt dismissWithClickedButtonIndex:prompt.cancelButtonIndex animated:YES];
+    activeTwoFactorAlert = nil;
+    activeTwoFactorPrompt = nil;
+}
 
 static void showVerificationCodePrompt(void) {
     GSAPortTwoFactorPrompt *prompt = [GSAPortTwoFactorPrompt new];
@@ -288,24 +306,38 @@ static void showVerificationCodePrompt(void) {
     UITextField *codeField = [alert textFieldAtIndex:0];
     codeField.placeholder = @"Verification Code";
     codeField.keyboardType = UIKeyboardTypeNumberPad;
+    activeTwoFactorAlert = alert;
     [alert show];
     NSLog(@"[GSAPort][%@] displayed SpringBoard verification-code prompt", GSAPortProcessName());
 }
 
-static NSString *presentVerificationCodePrompt(void) {
+static NSString *presentVerificationCodePrompt(BOOL *wasCancelled, BOOL *didTimeOut) {
     __block NSString *code = nil;
+    __block BOOL cancelled = NO;
     dispatch_semaphore_t completion = dispatch_semaphore_create(0);
-    int token = 0;
-    notify_register_dispatch(twoFactorCodeNotification, &token, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(int notificationToken) {
+    int codeToken = 0;
+    int cancelToken = 0;
+    notify_register_dispatch(twoFactorCodeNotification, &codeToken, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(int notificationToken) {
         uint64_t state = 0;
         notify_get_state(notificationToken, &state);
         if (state > 0) code = [NSString stringWithFormat:@"%06llu", state];
         dispatch_semaphore_signal(completion);
     });
+    notify_register_dispatch(twoFactorCancelNotification, &cancelToken, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(int notificationToken) {
+        cancelled = YES;
+        dispatch_semaphore_signal(completion);
+    });
     NSLog(@"[GSAPort][%@] requesting SpringBoard verification-code prompt", GSAPortProcessName());
     notify_post(twoFactorPromptNotification);
-    dispatch_semaphore_wait(completion, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
-    notify_cancel(token);
+    long waitResult = dispatch_semaphore_wait(completion, dispatch_time(DISPATCH_TIME_NOW, twoFactorPromptTimeoutSeconds * NSEC_PER_SEC));
+    notify_cancel(codeToken);
+    notify_cancel(cancelToken);
+    if (waitResult != 0) {
+        NSLog(@"[GSAPort][%@] verification-code prompt timed out", GSAPortProcessName());
+        notify_post(twoFactorPromptDismissNotification);
+    }
+    if (wasCancelled) *wasCancelled = cancelled;
+    if (didTimeOut) *didTimeOut = (waitResult != 0);
     return code;
 }
 static NSDictionary *cachedAnisette = nil;
@@ -529,6 +561,22 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 @interface GSAPortProtocol : NSURLProtocol
 @end
 
+%hook UIAlertView
+- (void)show {
+    // Preferences turns a deliberately cancelled NSURLProtocol request into
+    // its own generic "Verification Failed" alert. Suppress only that alert,
+    // and only for the few seconds immediately following our Cancel button.
+    if ([GSAPortProcessName() isEqualToString:@"Preferences"] &&
+        time(NULL) <= suppressVerificationFailedUntil &&
+        [self.title rangeOfString:@"verification failed" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        suppressVerificationFailedUntil = 0;
+        NSLog(@"[GSAPort][Preferences] suppressed verification-failed alert after cancellation");
+        return;
+    }
+    %orig;
+}
+%end
+
 @implementation GSAPortProtocol
 
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
@@ -550,10 +598,23 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 }
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+    // Settings normally gives this request a short deadline.  Allow the
+    // verification-code prompt to finish, with a little time for GSA to
+    // validate the completed login afterward.
+    NSURL *url = request.URL;
+    if ([url.host isEqualToString:@"setup.icloud.com"] &&
+        [url.path isEqualToString:@"/setup/login_or_create_account"]) {
+        NSMutableURLRequest *canonicalRequest = [request mutableCopy];
+        canonicalRequest.timeoutInterval = twoFactorPromptTimeoutSeconds + 60;
+        return canonicalRequest;
+    }
     return request;
 }
 
 - (void)stopLoading {
+    // If Settings abandons its login request, do not leave a SpringBoard
+    // verification alert in front of it.
+    notify_post(twoFactorPromptDismissNotification);
 }
 
 - (void)startLoading {
@@ -1058,7 +1119,28 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 [NSURLConnection sendSynchronousRequest:triggerReq returningResponse:&triggerResponse error:&triggerError];
 
                 pendingTwoFactor[username] = @{@"password": realPassword, @"dsid": dsid2fa ?: @"", @"idmsToken": idmsToken2fa ?: @""};
-                NSString *enteredCode = presentVerificationCodePrompt();
+                BOOL verificationCancelled = NO;
+                BOOL verificationTimedOut = NO;
+                NSString *enteredCode = presentVerificationCodePrompt(&verificationCancelled, &verificationTimedOut);
+                if (verificationCancelled) {
+                    [pendingTwoFactor removeObjectForKey:username];
+                    suppressVerificationFailedUntil = time(NULL) + 5;
+                    NSLog(@"[GSAPort][%@] ending login because verification was cancelled", GSAPortProcessName());
+                    NSError *cancelledError = [NSError errorWithDomain:NSURLErrorDomain
+                                                                  code:NSURLErrorCancelled
+                                                              userInfo:nil];
+                    [self.client URLProtocol:self didFailWithError:cancelledError];
+                    return;
+                }
+                if (verificationTimedOut) {
+                    [pendingTwoFactor removeObjectForKey:username];
+                    NSLog(@"[GSAPort][%@] ending login because verification timed out", GSAPortProcessName());
+                    NSError *timeoutError = [NSError errorWithDomain:NSURLErrorDomain
+                                                                code:NSURLErrorTimedOut
+                                                            userInfo:nil];
+                    [self.client URLProtocol:self didFailWithError:timeoutError];
+                    return;
+                }
                 NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
                 if (enteredCode.length != 6 || [enteredCode rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
                     NSLog(@"[GSAPort][%@] verification-code prompt was cancelled or invalid", GSAPortProcessName());
@@ -1376,6 +1458,9 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         notify_register_check(twoFactorCodeNotification, &twoFactorCodeNotificationToken);
         notify_register_dispatch(twoFactorPromptNotification, &twoFactorPromptNotificationToken, dispatch_get_main_queue(), ^(int token) {
             showVerificationCodePrompt();
+        });
+        notify_register_dispatch(twoFactorPromptDismissNotification, &twoFactorPromptDismissNotificationToken, dispatch_get_main_queue(), ^(int token) {
+            dismissVerificationCodePrompt();
         });
         NSLog(@"[GSAPort][SpringBoard] registered verification-code prompt observer");
     }
