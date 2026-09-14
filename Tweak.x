@@ -253,11 +253,16 @@ static const char *twoFactorPromptNotification = "com.podpod123.gsaport.twofacto
 static const char *twoFactorCodeNotification = "com.podpod123.gsaport.twofactor-code";
 static const char *twoFactorCancelNotification = "com.podpod123.gsaport.twofactor-cancel";
 static const char *twoFactorPromptDismissNotification = "com.podpod123.gsaport.twofactor-prompt-dismiss";
+static const char *twoFactorRateLimitNotification = "com.podpod123.gsaport.twofactor-rate-limit";
 static int twoFactorPromptNotificationToken = 0;
 static int twoFactorCodeNotificationToken = 0;
 static int twoFactorPromptDismissNotificationToken = 0;
+static int twoFactorRateLimitNotificationToken = 0;
 static const int64_t twoFactorPromptTimeoutSeconds = 30;
 static time_t suppressVerificationFailedUntil = 0;
+static NSString *twoFactorPhoneLabelPath(void) {
+    return @"/tmp/com.podpod123.gsaport-phone-label";
+}
 
 static NSString *GSAPortProcessName(void) {
     return [[NSProcessInfo processInfo] processName] ?: @"unknown";
@@ -297,8 +302,11 @@ static void dismissVerificationCodePrompt(void) {
 static void showVerificationCodePrompt(void) {
     GSAPortTwoFactorPrompt *prompt = [GSAPortTwoFactorPrompt new];
     activeTwoFactorPrompt = prompt;
+    NSString *phoneLabel = [NSString stringWithContentsOfFile:twoFactorPhoneLabelPath() encoding:NSUTF8StringEncoding error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:twoFactorPhoneLabelPath() error:nil];
+    NSString *message = phoneLabel.length ? [NSString stringWithFormat:@"Enter the verification code sent to %@.", phoneLabel] : @"Enter the verification code sent to your other devices.";
     UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Apple ID Verification Code"
-                                                    message:@"Enter the verification code sent to your other devices."
+                                                    message:message
                                                    delegate:prompt
                                           cancelButtonTitle:@"Cancel"
                                           otherButtonTitles:@"Verify", nil];
@@ -311,7 +319,17 @@ static void showVerificationCodePrompt(void) {
     NSLog(@"[GSAPort][%@] displayed SpringBoard verification-code prompt", GSAPortProcessName());
 }
 
-static NSString *presentVerificationCodePrompt(BOOL *wasCancelled, BOOL *didTimeOut) {
+static void showTwoFactorRateLimitAlert(void) {
+    UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Verification Failed"
+                                                    message:@"Verification codes cannot be sent to this phone number at this time. Please try again later."
+                                                   delegate:nil
+                                          cancelButtonTitle:@"OK"
+                                          otherButtonTitles:nil];
+    [alert show];
+    NSLog(@"[GSAPort][%@] displayed SMS rate-limit alert", GSAPortProcessName());
+}
+
+static NSString *presentVerificationCodePrompt(BOOL *wasCancelled, BOOL *didTimeOut, NSString *phoneLabel) {
     __block NSString *code = nil;
     __block BOOL cancelled = NO;
     dispatch_semaphore_t completion = dispatch_semaphore_create(0);
@@ -328,6 +346,11 @@ static NSString *presentVerificationCodePrompt(BOOL *wasCancelled, BOOL *didTime
         dispatch_semaphore_signal(completion);
     });
     NSLog(@"[GSAPort][%@] requesting SpringBoard verification-code prompt", GSAPortProcessName());
+    if (phoneLabel.length) {
+        [phoneLabel writeToFile:twoFactorPhoneLabelPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [[NSFileManager defaultManager] removeItemAtPath:twoFactorPhoneLabelPath() error:nil];
+    }
     notify_post(twoFactorPromptNotification);
     long waitResult = dispatch_semaphore_wait(completion, dispatch_time(DISPATCH_TIME_NOW, twoFactorPromptTimeoutSeconds * NSEC_PER_SEC));
     notify_cancel(codeToken);
@@ -429,6 +452,98 @@ static NSString *dynamicClientInfo(void) {
     NSString *model = realDeviceModel() ?: @"iPod1,1";
     if ([model hasPrefix:@"iPhone"]) model = @"iPod1,1";
     return [NSString stringWithFormat:@"<%@> <iPhone OS;%@;12A365> <com.apple.AuthKit/1 (com.apple.akd/1.0)>", model, claimedVersion];
+}
+
+static NSMutableURLRequest *phoneVerificationRequest(NSString *urlString, NSString *identityToken, NSDictionary *cpd) {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
+    [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:request];
+    [request setValue:@"application/x-plist" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"application/x-buddyml" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"Preferences" forHTTPHeaderField:@"X-Apple-Client-App-Name"];
+    [request setValue:@"Settings/1112.96 CFNetwork/1335.0.3.4 Darwin/21.6.0" forHTTPHeaderField:@"User-Agent"];
+    [request setValue:@"appleIdSettings" forHTTPHeaderField:@"X-Apple-I-App-Provided-Context"];
+    [request setValue:@"en-us" forHTTPHeaderField:@"Accept-Language"];
+    [request setValue:@"0" forHTTPHeaderField:@"X-Apple-I-Device-Configuration-Mode"];
+    [request setValue:@"0" forHTTPHeaderField:@"X-Apple-I-DeviceUserMode"];
+    [request setValue:@"1" forHTTPHeaderField:@"X-Apple-I-ICSCREC"];
+    [request setValue:@"1" forHTTPHeaderField:@"X-Apple-I-PRK-Gen"];
+    [request setValue:@"2" forHTTPHeaderField:@"X-Apple-I-Appearance"];
+    [request setValue:@"com.apple.authkit.generic" forHTTPHeaderField:@"X-Apple-Security-Upgrade-Context"];
+    [request setValue:@"icloud" forHTTPHeaderField:@"X-Apple-AK-Context-Type"];
+    [request setValue:@"1" forHTTPHeaderField:@"X-Apple-Offer-Security-Upgrade"];
+    [request setValue:@"false" forHTTPHeaderField:@"X-Apple-I-CDP-Circle-Status"];
+    [request setValue:@"1776" forHTTPHeaderField:@"X-Apple-iOS-SLA-Version"];
+    [request setValue:@"W3sic2xvdElEIjoxLCJkYXRhUHJlZmVycmVkIjp0cnVlLCJwaHlzaWNhbFNpbSI6dHJ1ZSwiaW5Vc2UiOjAsImRlZmF1bHRWb2ljZSI6dHJ1ZX1d" forHTTPHeaderField:@"X-Apple-I-Phone"];
+    NSString *country = [[NSLocale currentLocale] objectForKey:NSLocaleCountryCode] ?: @"GB";
+    [request setValue:country forHTTPHeaderField:@"X-MMe-Country"];
+    [request setValue:identityToken forHTTPHeaderField:@"X-Apple-Identity-Token"];
+    [request setValue:@"<iPhone9,3> <iPhone OS;15.8.8;19H422> <com.apple.AuthKit/1 (com.apple.Preferences/1112.96)>" forHTTPHeaderField:@"X-Mme-Client-Info"];
+    if (cpd) {
+        for (NSString *key in cpd) {
+            if ([key caseInsensitiveCompare:@"X-Apple-I-MD-LU"] == NSOrderedSame) continue;
+            [request setValue:cpd[key] forHTTPHeaderField:key];
+        }
+    }
+    [request setValue:@"true" forHTTPHeaderField:@"X-Apple-I-ICSCREC"];
+    [request setValue:@"en_GB" forHTTPHeaderField:@"X-Apple-I-Locale"];
+    [request setValue:@"en-GB,en;q=0.9" forHTTPHeaderField:@"Accept-Language"];
+    [request setValue:@"BST" forHTTPHeaderField:@"X-Apple-I-TimeZone"];
+    [request setValue:@"3600" forHTTPHeaderField:@"X-Apple-I-TimeZone-Offset"];
+    [request setValue:@"<iPhone9,3> <iPhone OS;15.8.8;19H422> <com.apple.AuthKit/1 (com.apple.Preferences/1112.96)>" forHTTPHeaderField:@"X-MMe-Client-Info"];
+    [request setValue:@"PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCFET0NUWVBFIHBsaXN0IFBVQkxJQyAiLS8vQXBwbGUvL0RURCBQTElTVCAxLjAvL0VOIiAiaHR0cDovL3d3dy5hcHBsZS5jb20vRFREcy9Qcm9wZXJ0eUxpc3QtMS4wLmR0ZCI+CjxwbGlzdCB2ZXJzaW9uPSIxLjAiPgo8YXJyYXkvPgo8L3BsaXN0Pgo=" forHTTPHeaderField:@"X-Apple-I-CFU-State"];
+    return request;
+}
+
+static NSString *attributeValue(NSString *body, NSString *attribute) {
+    NSString *pattern = [NSString stringWithFormat:@"%@=\\\"([^\\\"]+)\\\"", [NSRegularExpression escapedPatternForString:attribute]];
+    NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+    NSTextCheckingResult *match = [expression firstMatchInString:body options:0 range:NSMakeRange(0, body.length)];
+    return match ? [body substringWithRange:[match rangeAtIndex:1]] : nil;
+}
+
+static NSDictionary *fetchSMSOnlyVerificationInfo(NSString *identityToken, NSDictionary *cpd) {
+    NSData *data = nil;
+    NSHTTPURLResponse *httpResponse = nil;
+    for (NSInteger attempt = 0; attempt < 2; attempt++) {
+        NSMutableURLRequest *request = phoneVerificationRequest(@"https://gsa.apple.com/auth", identityToken, cpd);
+        NSURLResponse *response = nil;
+        NSError *error = nil;
+        data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
+        httpResponse = (NSHTTPURLResponse *)response;
+        if (data && httpResponse.statusCode == 200) break;
+    }
+    if (!data || httpResponse.statusCode != 200) return nil;
+    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if ([body rangeOfString:@"Too Many Codes Sent" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [body rangeOfString:@"Verification codes cannot be sent" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        return @{@"rateLimited": @YES};
+    }
+    if ([body rangeOfString:@"/auth/verify/phone/securitycode"].location == NSNotFound) return nil;
+    NSString *phoneIdentifier = attributeValue(body, @"phoneNumber.id");
+    NSString *mode = attributeValue(body, @"mode");
+    NSString *nonFTEU = attributeValue(body, @"phoneNumber.nonFTEU");
+    NSString *phoneLabel = nil;
+    NSRegularExpression *phoneExpression = [NSRegularExpression regularExpressionWithPattern:@"phone call to ([^\"]+)" options:0 error:nil];
+    NSTextCheckingResult *phoneMatch = [phoneExpression firstMatchInString:body options:0 range:NSMakeRange(0, body.length)];
+    if (phoneMatch) {
+        phoneLabel = [body substringWithRange:[phoneMatch rangeAtIndex:1]];
+        phoneLabel = [phoneLabel stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([phoneLabel hasSuffix:@"."]) phoneLabel = [phoneLabel substringToIndex:phoneLabel.length - 1];
+    }
+    if (!phoneIdentifier || ![mode isEqualToString:@"sms"]) return nil;
+    NSMutableDictionary *info = [@{@"phoneNumber.id": phoneIdentifier, @"mode": mode, @"phoneNumber.nonFTEU": nonFTEU ?: @"false"} mutableCopy];
+    if (phoneLabel.length) info[@"phoneLabel"] = phoneLabel;
+    return info;
+}
+
+static BOOL submitSMSOnlyVerificationCode(NSString *identityToken, NSDictionary *phoneInfo, NSString *code, NSDictionary *cpd) {
+    NSMutableURLRequest *request = phoneVerificationRequest(@"https://gsa.apple.com/auth/verify/phone/securitycode?referrer=/auth", identityToken, cpd);
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = [NSPropertyListSerialization dataWithPropertyList:@{@"securityCode.code": code, @"serverInfo": phoneInfo} format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+    NSURLResponse *response = nil;
+    NSError *error = nil;
+    NSData *data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
+    return data && [(NSHTTPURLResponse *)response statusCode] == 200;
 }
 
 static void postDeviceLiveness(NSString *adsid, NSString *hbToken, NSDictionary *cpd) {
@@ -1102,6 +1217,45 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 NSString *identityToken2fa = base64_encode([combined2fa dataUsingEncoding:NSUTF8StringEncoding]);
 
                 NSDictionary *triggerCpd = fetchAnisetteFresh();
+                NSDictionary *smsOnlyInfo = fetchSMSOnlyVerificationInfo(identityToken2fa, triggerCpd);
+                if ([smsOnlyInfo[@"rateLimited"] boolValue]) {
+                    notify_post(twoFactorRateLimitNotification);
+                    [pendingTwoFactor removeObjectForKey:username];
+                    suppressVerificationFailedUntil = time(NULL) + 5;
+                    NSError *rateLimitError = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil];
+                    [self.client URLProtocol:self didFailWithError:rateLimitError];
+                    return;
+                }
+                if (smsOnlyInfo) {
+                    NSLog(@"[GSAPort][%@] Apple selected SMS-only verification", GSAPortProcessName());
+                    BOOL verificationCancelled = NO;
+                    BOOL verificationTimedOut = NO;
+                    NSString *enteredCode = presentVerificationCodePrompt(&verificationCancelled, &verificationTimedOut, smsOnlyInfo[@"phoneLabel"]);
+                    if (verificationCancelled) {
+                        [pendingTwoFactor removeObjectForKey:username];
+                        suppressVerificationFailedUntil = time(NULL) + 5;
+                        NSError *cancelledError = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil];
+                        [self.client URLProtocol:self didFailWithError:cancelledError];
+                        return;
+                    }
+                    if (verificationTimedOut) {
+                        [pendingTwoFactor removeObjectForKey:username];
+                        NSError *timeoutError = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorTimedOut userInfo:nil];
+                        [self.client URLProtocol:self didFailWithError:timeoutError];
+                        return;
+                    }
+                    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+                    if (enteredCode.length != 6 || [enteredCode rangeOfCharacterFromSet:nonDigits].location != NSNotFound || !submitSMSOnlyVerificationCode(identityToken2fa, smsOnlyInfo, enteredCode, triggerCpd)) {
+                        NSHTTPURLResponse *failResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
+                        [self.client URLProtocol:self didReceiveResponse:failResponse cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+                        [self.client URLProtocolDidFinishLoading:self];
+                        return;
+                    }
+                    [pendingTwoFactor removeObjectForKey:username];
+                    trailingCode = nil;
+                    NSLog(@"[GSAPort][%@] SMS verification succeeded; resuming sign-in", GSAPortProcessName());
+                    goto retryAfterCodePrompt;
+                }
 
                 NSMutableURLRequest *triggerReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gsa.apple.com/auth/verify/trusteddevice"]];
                 [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:triggerReq];
@@ -1121,7 +1275,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 pendingTwoFactor[username] = @{@"password": realPassword, @"dsid": dsid2fa ?: @"", @"idmsToken": idmsToken2fa ?: @""};
                 BOOL verificationCancelled = NO;
                 BOOL verificationTimedOut = NO;
-                NSString *enteredCode = presentVerificationCodePrompt(&verificationCancelled, &verificationTimedOut);
+                NSString *enteredCode = presentVerificationCodePrompt(&verificationCancelled, &verificationTimedOut, nil);
                 if (verificationCancelled) {
                     [pendingTwoFactor removeObjectForKey:username];
                     suppressVerificationFailedUntil = time(NULL) + 5;
@@ -1461,6 +1615,9 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         });
         notify_register_dispatch(twoFactorPromptDismissNotification, &twoFactorPromptDismissNotificationToken, dispatch_get_main_queue(), ^(int token) {
             dismissVerificationCodePrompt();
+        });
+        notify_register_dispatch(twoFactorRateLimitNotification, &twoFactorRateLimitNotificationToken, dispatch_get_main_queue(), ^(int token) {
+            showTwoFactorRateLimitAlert();
         });
         NSLog(@"[GSAPort][SpringBoard] registered verification-code prompt observer");
     }
