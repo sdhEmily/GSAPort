@@ -6,4 +6,4 @@ Description: Ports Apple's GrandSlam Authentication protocol to iOS versions pri
 Maintainer: Pod <pod@podpod123.com>
 Author: Pod <pod@podpod123.com>
 Section: Tweaks
-Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 6.0), firmware (<< 9.0)
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 5.0), firmware (<< 9.0)

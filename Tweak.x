@@ -482,7 +482,7 @@ static NSMutableURLRequest *phoneVerificationRequest(NSString *urlString, NSStri
     if (cpd) {
         for (NSString *key in cpd) {
             if ([key caseInsensitiveCompare:@"X-Apple-I-MD-LU"] == NSOrderedSame) continue;
-            [request setValue:cpd[key] forHTTPHeaderField:key];
+            [request setValue:[cpd objectForKey:key] forHTTPHeaderField:key];
         }
     }
     [request setValue:@"true" forHTTPHeaderField:@"X-Apple-I-ICSCREC"];
@@ -533,7 +533,7 @@ static NSDictionary *fetchSMSOnlyVerificationInfo(NSString *identityToken, NSDic
     }
     if (!phoneIdentifier || ![mode isEqualToString:@"sms"]) return nil;
     NSMutableDictionary *info = [@{@"phoneNumber.id": phoneIdentifier, @"mode": mode, @"phoneNumber.nonFTEU": nonFTEU ?: @"false"} mutableCopy];
-    if (phoneLabel.length) info[@"phoneLabel"] = phoneLabel;
+    if (phoneLabel.length) [info setObject:phoneLabel forKey:@"phoneLabel"];
     return info;
 }
 
@@ -587,7 +587,7 @@ static void postDeviceLiveness(NSString *adsid, NSString *hbToken, NSDictionary 
     [liveReq setValue:@"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0" forHTTPHeaderField:@"User-Agent"];
     [liveReq setValue:hbIdentity forHTTPHeaderField:@"X-Apple-HB-Token"];
     [liveReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
-    for (NSString *key in cpd) [liveReq setValue:cpd[key] forHTTPHeaderField:key];
+    for (NSString *key in cpd) [liveReq setValue:[cpd objectForKey:key] forHTTPHeaderField:key];
 
     NSURLResponse *liveResponse = nil;
     NSError *liveError = nil;
@@ -647,8 +647,8 @@ static NSDictionary *fetchAnisetteFreshWithFreshIdentity(BOOL *freshIdentity) {
             *freshIdentity = YES;
         }
         NSMutableDictionary *anisetteMutable = [anisetteJson mutableCopy];
-        anisetteMutable[@"X-Apple-I-SRL-NO"] = realDeviceSerial();
-        anisetteMutable[@"X-MMe-Client-Info"] = dynamicClientInfo();
+        [anisetteMutable setObject:realDeviceSerial() forKey:@"X-Apple-I-SRL-NO"];
+        [anisetteMutable setObject:dynamicClientInfo() forKey:@"X-MMe-Client-Info"];
         return anisetteMutable;
     }
     return nil;
@@ -769,11 +769,11 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 id parsedFMF = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
                 if ([parsedFMF isKindOfClass:[NSDictionary class]]) {
                     NSMutableDictionary *bodyDictFMF = [parsedFMF mutableCopy];
-                    if ([bodyDictFMF[@"clientContext"] isKindOfClass:[NSDictionary class]]) {
-                        NSMutableDictionary *clientContextFMF = [bodyDictFMF[@"clientContext"] mutableCopy];
-                        clientContextFMF[@"osVersion"] = @"7.0";
-                        clientContextFMF[@"appVersion"] = @"3.0";
-                        bodyDictFMF[@"clientContext"] = clientContextFMF;
+                    if ([[bodyDictFMF objectForKey:@"clientContext"] isKindOfClass:[NSDictionary class]]) {
+                        NSMutableDictionary *clientContextFMF = [[bodyDictFMF objectForKey:@"clientContext"] mutableCopy];
+                        [clientContextFMF setObject:@"7.0" forKey:@"osVersion"];
+                        [clientContextFMF setObject:@"3.0" forKey:@"appVersion"];
+                        [bodyDictFMF setObject:clientContextFMF forKey:@"clientContext"];
                     }
                     [bodyDictFMF removeObjectForKey:@"serverContext"];
                     NSData *reserializedFMF = [NSJSONSerialization dataWithJSONObject:bodyDictFMF options:0 error:nil];
@@ -802,11 +802,11 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 id parsedResp = [NSJSONSerialization JSONObjectWithData:dataFMF options:0 error:nil];
                 if ([parsedResp isKindOfClass:[NSDictionary class]]) {
                     NSMutableDictionary *respDict = [parsedResp mutableCopy];
-                    if ([respDict[@"serverContext"] isKindOfClass:[NSDictionary class]]) {
-                        NSMutableDictionary *sc = [respDict[@"serverContext"] mutableCopy];
+                    if ([[respDict objectForKey:@"serverContext"] isKindOfClass:[NSDictionary class]]) {
+                        NSMutableDictionary *sc = [[respDict objectForKey:@"serverContext"] mutableCopy];
                         [sc removeObjectForKey:@"authToken"];
                         [sc removeObjectForKey:@"notificationToken"];
-                        respDict[@"serverContext"] = sc;
+                        [respDict setObject:sc forKey:@"serverContext"];
                         NSData *modifiedResp = [NSJSONSerialization dataWithJSONObject:respDict options:0 error:nil];
                         if (modifiedResp) dataFMF = modifiedResp;
                     }
@@ -838,7 +838,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             NSDictionary *cpdAS = tokenNeedsMD ? fetchAnisetteCached() : nil;
 
             NSMutableURLRequest *reqAS = buildForwardedRequest(request.URL, request.HTTPMethod, request.HTTPBody, request);
-            if (cpdAS) { for (NSString *key in cpdAS) [reqAS setValue:cpdAS[key] forHTTPHeaderField:key]; }
+            if (cpdAS) { for (NSString *key in cpdAS) [reqAS setValue:[cpdAS objectForKey:key] forHTTPHeaderField:key]; }
 
             NSURLResponse *responseAS = nil;
             NSError *errorAS = nil;
@@ -870,11 +870,11 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 id parsedR = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
                 if ([parsedR isKindOfClass:[NSDictionary class]]) {
                     NSMutableDictionary *bodyDictR = [parsedR mutableCopy];
-                    if ([bodyDictR[@"clientContext"] isKindOfClass:[NSDictionary class]]) {
-                        NSMutableDictionary *clientContextR = [bodyDictR[@"clientContext"] mutableCopy];
-                        clientContextR[@"osVersion"] = @"9.0";
-                        clientContextR[@"appVersion"] = @"5.0";
-                        bodyDictR[@"clientContext"] = clientContextR;
+                    if ([[bodyDictR objectForKey:@"clientContext"] isKindOfClass:[NSDictionary class]]) {
+                        NSMutableDictionary *clientContextR = [[bodyDictR objectForKey:@"clientContext"] mutableCopy];
+                        [clientContextR setObject:@"9.0" forKey:@"osVersion"];
+                        [clientContextR setObject:@"5.0" forKey:@"appVersion"];
+                        [bodyDictR setObject:clientContextR forKey:@"clientContext"];
                         NSData *reserializedR = [NSJSONSerialization dataWithJSONObject:bodyDictR options:0 error:nil];
                         if (reserializedR) rewrittenBodyR = reserializedR;
                     }
@@ -953,7 +953,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
     } else {
         NSDictionary *bodyDict = [NSPropertyListSerialization propertyListWithData:originalBody options:0 format:NULL error:nil];
         username = bodyDict[isLoginDelegates ? @"apple-id" : @"username"];
-        submittedPassword = bodyDict[@"password"];
+        submittedPassword = [bodyDict objectForKey:@"password"];
     }
 
     if (!username || !submittedPassword) {
@@ -971,11 +971,11 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 id parsedC = [NSJSONSerialization JSONObjectWithData:originalBody options:0 error:nil];
                 if ([parsedC isKindOfClass:[NSDictionary class]]) {
                     NSMutableDictionary *bodyDictC = [parsedC mutableCopy];
-                    if ([bodyDictC[@"clientContext"] isKindOfClass:[NSDictionary class]]) {
-                        NSMutableDictionary *clientContextC = [bodyDictC[@"clientContext"] mutableCopy];
-                        clientContextC[@"osVersion"] = @"9.0";
-                        clientContextC[@"appVersion"] = @"5.0";
-                        bodyDictC[@"clientContext"] = clientContextC;
+                    if ([[bodyDictC objectForKey:@"clientContext"] isKindOfClass:[NSDictionary class]]) {
+                        NSMutableDictionary *clientContextC = [[bodyDictC objectForKey:@"clientContext"] mutableCopy];
+                        [clientContextC setObject:@"9.0" forKey:@"osVersion"];
+                        [clientContextC setObject:@"5.0" forKey:@"appVersion"];
+                        [bodyDictC setObject:clientContextC forKey:@"clientContext"];
                         NSData *reserializedC = [NSJSONSerialization dataWithJSONObject:bodyDictC options:0 error:nil];
                         if (reserializedC) rewrittenBodyC = reserializedC;
                     }
@@ -1009,13 +1009,13 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         return;
     }
 
-    NSDictionary *pending = pendingTwoFactor[username];
+    NSDictionary *pending = [pendingTwoFactor objectForKey:username];
     __block NSString *trailingCode = nil;
     if (pending && submittedPassword.length == 6 && [submittedPassword rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location == NSNotFound) {
         trailingCode = submittedPassword;
     }
 
-    NSString *realPassword = trailingCode ? pending[@"password"] : submittedPassword;
+    NSString *realPassword = trailingCode ? [pending objectForKey:@"password"] : submittedPassword;
     __block BOOL retriedFreshDeviceIdentity = NO;
 
     NSOperationQueue *queue = [[NSOperationQueue alloc] init];
@@ -1023,8 +1023,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 
     retryAfterCodePrompt:
         if (trailingCode) {
-            NSDictionary *pend = pendingTwoFactor[username];
-            NSString *combined = [NSString stringWithFormat:@"%@:%@", pend[@"dsid"], pend[@"idmsToken"]];
+            NSDictionary *pend = [pendingTwoFactor objectForKey:username];
+            NSString *combined = [NSString stringWithFormat:@"%@:%@", [pend objectForKey:@"dsid"], [pend objectForKey:@"idmsToken"]];
             NSString *identityToken = base64_encode([combined dataUsingEncoding:NSUTF8StringEncoding]);
 
             NSDictionary *submitCpd = fetchAnisetteFresh();
@@ -1040,7 +1040,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             [submitReq setValue:@"11.2 (11B41)" forHTTPHeaderField:@"X-Xcode-Version"];
             [submitReq setValue:trailingCode forHTTPHeaderField:@"security-code"];
             [submitReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
-            if (submitCpd) { for (NSString *key in submitCpd) [submitReq setValue:submitCpd[key] forHTTPHeaderField:key]; }
+            if (submitCpd) { for (NSString *key in submitCpd) [submitReq setValue:[submitCpd objectForKey:key] forHTTPHeaderField:key]; }
             NSURLResponse *submitResponse = nil;
             NSError *submitError = nil;
             [NSURLConnection sendSynchronousRequest:submitReq returningResponse:&submitResponse error:&submitError];
@@ -1072,7 +1072,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         NSData *aData = [NSData dataWithBytes:bytesA length:lenA];
 
         NSMutableDictionary *initInner = [NSMutableDictionary dictionaryWithDictionary:@{@"A2k": aData, @"ps": @[@"s2k", @"s2k_fo"], @"u": username, @"o": @"init"}];
-        initInner[@"cpd"] = cpd;
+        [initInner setObject:cpd forKey:@"cpd"];
         NSData *initPlistData = [NSPropertyListSerialization dataWithPropertyList:@{@"Header": @{@"Version": @"1.0.1"}, @"Request": initInner} format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
         NSMutableURLRequest *initReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gsa.apple.com/grandslam/GsService2"]];
         [NSURLProtocol setProperty:@YES forKey:@"GSAPortHandled" inRequest:initReq];
@@ -1082,14 +1082,15 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         [initReq setValue:@"*/*" forHTTPHeaderField:@"Accept"];
         [initReq setValue:@"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0" forHTTPHeaderField:@"User-Agent"];
         [initReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
-        [initReq setValue:cpd[@"X-Apple-I-MD-M"] forHTTPHeaderField:@"X-Apple-I-MD-M"];
-        [initReq setValue:cpd[@"X-Mme-Device-Id"] forHTTPHeaderField:@"X-Mme-Device-Id"];
+        [initReq setValue:[cpd objectForKey:@"X-Apple-I-MD-M"] forHTTPHeaderField:@"X-Apple-I-MD-M"];
+        [initReq setValue:[cpd objectForKey:@"X-Mme-Device-Id"] forHTTPHeaderField:@"X-Mme-Device-Id"];
         NSURLResponse *initResponse = nil;
         NSError *initError = nil;
         NSData *initData = [NSURLConnection sendSynchronousRequest:initReq returningResponse:&initResponse error:&initError];
-        NSDictionary *initResp = initData ? [NSPropertyListSerialization propertyListWithData:initData options:0 format:NULL error:nil][@"Response"] : nil;
+        NSDictionary *initPlist = initData ? [NSPropertyListSerialization propertyListWithData:initData options:0 format:NULL error:nil] : nil;
+        NSDictionary *initResp = [initPlist objectForKey:@"Response"];
 
-        if (!initResp || !initResp[@"sp"]) {
+        if (!initResp || ![initResp objectForKey:@"sp"]) {
             srp_user_delete(usr);
             NSHTTPURLResponse *failResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{}];
             [self.client URLProtocol:self didReceiveResponse:failResponse cacheStoragePolicy:NSURLCacheStorageNotAllowed];
@@ -1097,11 +1098,11 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             return;
         }
 
-        NSData *salt = initResp[@"s"];
-        NSInteger iterations = [initResp[@"i"] integerValue];
-        NSString *protocol = initResp[@"sp"];
-        NSData *bData = initResp[@"B"];
-        NSString *continuation = initResp[@"c"];
+        NSData *salt = [initResp objectForKey:@"s"];
+        NSInteger iterations = [[initResp objectForKey:@"i"] integerValue];
+        NSString *protocol = [initResp objectForKey:@"sp"];
+        NSData *bData = [initResp objectForKey:@"B"];
+        NSString *continuation = [initResp objectForKey:@"c"];
 
         unsigned char shaDigest[CC_SHA256_DIGEST_LENGTH];
         const char *pwUTF8 = [realPassword UTF8String];
@@ -1131,7 +1132,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         NSData *mData = [NSData dataWithBytes:bytesM length:lenM];
 
         NSMutableDictionary *completeInner = [NSMutableDictionary dictionaryWithDictionary:@{@"c": continuation, @"M1": mData, @"u": username, @"o": @"complete"}];
-        completeInner[@"cpd"] = cpd;
+        [completeInner setObject:cpd forKey:@"cpd"];
         NSData *completePlistData = [NSPropertyListSerialization dataWithPropertyList:@{@"Header": @{@"Version": @"1.0.1"}, @"Request": completeInner} format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
         NSDictionary *cpdComplete = fetchAnisetteFresh() ?: cpd;
 
@@ -1143,12 +1144,13 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         [completeReq setValue:@"*/*" forHTTPHeaderField:@"Accept"];
         [completeReq setValue:@"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0" forHTTPHeaderField:@"User-Agent"];
         [completeReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
-        [completeReq setValue:cpdComplete[@"X-Apple-I-MD-M"] forHTTPHeaderField:@"X-Apple-I-MD-M"];
-        [completeReq setValue:cpdComplete[@"X-Mme-Device-Id"] forHTTPHeaderField:@"X-Mme-Device-Id"];
+        [completeReq setValue:[cpdComplete objectForKey:@"X-Apple-I-MD-M"] forHTTPHeaderField:@"X-Apple-I-MD-M"];
+        [completeReq setValue:[cpdComplete objectForKey:@"X-Mme-Device-Id"] forHTTPHeaderField:@"X-Mme-Device-Id"];
         NSURLResponse *completeResponse = nil;
         NSError *completeError = nil;
         NSData *completeData = [NSURLConnection sendSynchronousRequest:completeReq returningResponse:&completeResponse error:&completeError];
-        NSDictionary *completeResp = completeData ? [NSPropertyListSerialization propertyListWithData:completeData options:0 format:NULL error:nil][@"Response"] : nil;
+        NSDictionary *completePlist = completeData ? [NSPropertyListSerialization propertyListWithData:completeData options:0 format:NULL error:nil] : nil;
+        NSDictionary *completeResp = [completePlist objectForKey:@"Response"];
 
         if (!completeResp) {
             srp_user_delete(usr);
@@ -1158,10 +1160,10 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             return;
         }
 
-        NSDictionary *statusDict = completeResp[@"Status"];
-        NSInteger hsc = [statusDict[@"hsc"] integerValue];
-        NSInteger errorCode = [statusDict[@"ec"] integerValue];
-        NSData *m2Data = completeResp[@"M2"];
+        NSDictionary *statusDict = [completeResp objectForKey:@"Status"];
+        NSInteger hsc = [[statusDict objectForKey:@"hsc"] integerValue];
+        NSInteger errorCode = [[statusDict objectForKey:@"ec"] integerValue];
+        NSData *m2Data = [completeResp objectForKey:@"M2"];
         if (!m2Data) {
             srp_user_delete(usr);
             // A freshly provisioned identity is registered by Apple's first
@@ -1197,7 +1199,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         CCHmac(kCCHmacAlgSHA256, sessionKey.bytes, sessionKey.length, keyLabel.bytes, keyLabel.length, extraKeyMac);
         CCHmac(kCCHmacAlgSHA256, sessionKey.bytes, sessionKey.length, ivLabel.bytes, ivLabel.length, extraIvMac);
 
-        NSData *spdEncrypted = completeResp[@"spd"];
+        NSData *spdEncrypted = [completeResp objectForKey:@"spd"];
         size_t outLen = 0;
         NSMutableData *outData = [NSMutableData dataWithLength:spdEncrypted.length + kCCBlockSizeAES128];
         CCCryptorStatus cryptStatus = CCCrypt(kCCDecrypt, kCCAlgorithmAES128, kCCOptionPKCS7Padding, extraKeyMac, CC_SHA256_DIGEST_LENGTH, extraIvMac, spdEncrypted.bytes, spdEncrypted.length, outData.mutableBytes, outData.length, &outLen);
@@ -1223,14 +1225,14 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
         }
 
         if (hsc != 200) {
-                NSString *dsid2fa = spd[@"adsid"];
-                NSString *idmsToken2fa = spd[@"GsIdmsToken"];
+                NSString *dsid2fa = [spd objectForKey:@"adsid"];
+                NSString *idmsToken2fa = [spd objectForKey:@"GsIdmsToken"];
                 NSString *combined2fa = [NSString stringWithFormat:@"%@:%@", dsid2fa, idmsToken2fa];
                 NSString *identityToken2fa = base64_encode([combined2fa dataUsingEncoding:NSUTF8StringEncoding]);
 
                 NSDictionary *triggerCpd = fetchAnisetteFresh();
                 NSDictionary *smsOnlyInfo = fetchSMSOnlyVerificationInfo(identityToken2fa, triggerCpd);
-                if ([smsOnlyInfo[@"rateLimited"] boolValue]) {
+                if ([[smsOnlyInfo objectForKey:@"rateLimited"] boolValue]) {
                     notify_post(twoFactorRateLimitNotification);
                     [pendingTwoFactor removeObjectForKey:username];
                     suppressVerificationFailedUntil = time(NULL) + 5;
@@ -1242,7 +1244,7 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                     NSLog(@"[GSAPort][%@] Apple selected SMS-only verification", GSAPortProcessName());
                     BOOL verificationCancelled = NO;
                     BOOL verificationTimedOut = NO;
-                    NSString *enteredCode = presentVerificationCodePrompt(&verificationCancelled, &verificationTimedOut, smsOnlyInfo[@"phoneLabel"]);
+                    NSString *enteredCode = presentVerificationCodePrompt(&verificationCancelled, &verificationTimedOut, [smsOnlyInfo objectForKey:@"phoneLabel"]);
                     if (verificationCancelled) {
                         [pendingTwoFactor removeObjectForKey:username];
                         suppressVerificationFailedUntil = time(NULL) + 5;
@@ -1279,12 +1281,12 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 [triggerReq setValue:@"com.apple.gs.xcode.auth" forHTTPHeaderField:@"X-Apple-App-Info"];
                 [triggerReq setValue:@"11.2 (11B41)" forHTTPHeaderField:@"X-Xcode-Version"];
                 [triggerReq setValue:dynamicClientInfo() forHTTPHeaderField:@"X-Mme-Client-Info"];
-                if (triggerCpd) { for (NSString *key in triggerCpd) [triggerReq setValue:triggerCpd[key] forHTTPHeaderField:key]; }
+                if (triggerCpd) { for (NSString *key in triggerCpd) [triggerReq setValue:[triggerCpd objectForKey:key] forHTTPHeaderField:key]; }
                 NSURLResponse *triggerResponse = nil;
                 NSError *triggerError = nil;
                 [NSURLConnection sendSynchronousRequest:triggerReq returningResponse:&triggerResponse error:&triggerError];
 
-                pendingTwoFactor[username] = @{@"password": realPassword, @"dsid": dsid2fa ?: @"", @"idmsToken": idmsToken2fa ?: @""};
+                [pendingTwoFactor setObject:@{@"password": realPassword, @"dsid": dsid2fa ?: @"", @"idmsToken": idmsToken2fa ?: @""} forKey:username];
                 BOOL verificationCancelled = NO;
                 BOOL verificationTimedOut = NO;
                 NSString *enteredCode = presentVerificationCodePrompt(&verificationCancelled, &verificationTimedOut, nil);
@@ -1325,9 +1327,10 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             return;
         }
 
-        NSString *pet = spd[@"t"][@"com.apple.gs.idms.pet"][@"token"];
-        NSString *adsid = spd[@"adsid"];
-        NSString *hbToken = spd[@"t"][@"com.apple.gs.idms.hb"][@"token"];
+        NSDictionary *tokenData = [spd objectForKey:@"t"];
+        NSString *pet = [[tokenData objectForKey:@"com.apple.gs.idms.pet"] objectForKey:@"token"];
+        NSString *adsid = [spd objectForKey:@"adsid"];
+        NSString *hbToken = [[tokenData objectForKey:@"com.apple.gs.idms.hb"] objectForKey:@"token"];
         if (isICloudLogin) postDeviceLiveness(adsid, hbToken, fetchAnisetteFresh());
 
         if (isBrokenAuthenticateURL) {
@@ -1373,8 +1376,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             NSString *mmeAuthToken = nil;
             if (authData) {
                 NSDictionary *parsed = [NSPropertyListSerialization propertyListWithData:authData options:0 format:NULL error:nil];
-                dsid = parsed[@"appleAccountInfo"][@"dsid"];
-                mmeAuthToken = parsed[@"tokens"][@"mmeAuthToken"];
+                dsid = [[parsed objectForKey:@"appleAccountInfo"] objectForKey:@"dsid"];
+                mmeAuthToken = [[parsed objectForKey:@"tokens"] objectForKey:@"mmeAuthToken"];
             }
 
             if (!dsid || !mmeAuthToken) {
@@ -1419,8 +1422,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 
         if (isLoginDelegates) {
             NSMutableDictionary *substitutedDict = [[NSPropertyListSerialization propertyListWithData:originalBody options:0 format:NULL error:nil] mutableCopy];
-            substitutedDict[@"apple-id"] = adsid;
-            substitutedDict[@"password"] = pet;
+            [substitutedDict setObject:adsid forKey:@"apple-id"];
+            [substitutedDict setObject:pet forKey:@"password"];
             NSData *substituted = [NSPropertyListSerialization dataWithPropertyList:substitutedDict format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
 
             NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://setup.icloud.com/setup/iosbuddy/loginDelegates"]];
@@ -1452,9 +1455,9 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             }
 
             NSMutableDictionary *delegatesRespDict = [[NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil] mutableCopy];
-            NSDictionary *delegatesDict = delegatesRespDict[@"delegates"];
-            NSDictionary *mobilemeDict = [delegatesDict isKindOfClass:[NSDictionary class]] ? delegatesDict[@"com.apple.mobileme"] : nil;
-            BOOL mobilemeHasTokens = [mobilemeDict isKindOfClass:[NSDictionary class]] && [mobilemeDict[@"tokens"] isKindOfClass:[NSDictionary class]];
+            NSDictionary *delegatesDict = [delegatesRespDict objectForKey:@"delegates"];
+            NSDictionary *mobilemeDict = [delegatesDict isKindOfClass:[NSDictionary class]] ? [delegatesDict objectForKey:@"com.apple.mobileme"] : nil;
+            BOOL mobilemeHasTokens = [mobilemeDict isKindOfClass:[NSDictionary class]] && [[mobilemeDict objectForKey:@"tokens"] isKindOfClass:[NSDictionary class]];
 
             if (mobilemeHasTokens) {
                 NSString *identityAuthLD = base64_encode([[NSString stringWithFormat:@"%@:%@", username, pet] dataUsingEncoding:NSUTF8StringEncoding]);
@@ -1470,8 +1473,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                 NSString *oldStyleToken = nil;
                 if (authDataLD) {
                     NSDictionary *parsedAuthLD = [NSPropertyListSerialization propertyListWithData:authDataLD options:0 format:NULL error:nil];
-                    oldDsid = parsedAuthLD[@"appleAccountInfo"][@"dsid"];
-                    oldStyleToken = parsedAuthLD[@"tokens"][@"mmeAuthToken"];
+                    oldDsid = [[parsedAuthLD objectForKey:@"appleAccountInfo"] objectForKey:@"dsid"];
+                    oldStyleToken = [[parsedAuthLD objectForKey:@"tokens"] objectForKey:@"mmeAuthToken"];
                 }
 
                 if (oldDsid && oldStyleToken) {
@@ -1495,17 +1498,17 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
                     NSDictionary *replacementTokens = nil;
                     if (settingsDataLD) {
                         NSDictionary *parsedSettingsLD = [NSPropertyListSerialization propertyListWithData:settingsDataLD options:0 format:NULL error:nil];
-                        if ([parsedSettingsLD[@"tokens"] isKindOfClass:[NSDictionary class]]) {
-                            replacementTokens = parsedSettingsLD[@"tokens"];
+                        if ([[parsedSettingsLD objectForKey:@"tokens"] isKindOfClass:[NSDictionary class]]) {
+                            replacementTokens = [parsedSettingsLD objectForKey:@"tokens"];
                         }
                     }
 
                     if (replacementTokens) {
                         NSMutableDictionary *mutableDelegates = [delegatesDict mutableCopy];
                         NSMutableDictionary *mutableMobileme = [mobilemeDict mutableCopy];
-                        mutableMobileme[@"tokens"] = replacementTokens;
-                        mutableDelegates[@"com.apple.mobileme"] = mutableMobileme;
-                        delegatesRespDict[@"delegates"] = mutableDelegates;
+                        [mutableMobileme setObject:replacementTokens forKey:@"tokens"];
+                        [mutableDelegates setObject:mutableMobileme forKey:@"com.apple.mobileme"];
+                        [delegatesRespDict setObject:mutableDelegates forKey:@"delegates"];
                         NSData *modifiedDelegatesData = [NSPropertyListSerialization dataWithPropertyList:delegatesRespDict format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
                         if (modifiedDelegatesData) data = modifiedDelegatesData;
                     }
@@ -1520,8 +1523,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 
         if (isIMFT || isGC) {
             NSMutableDictionary *substitutedDict = [[NSPropertyListSerialization propertyListWithData:originalBody options:0 format:NULL error:nil] mutableCopy];
-            substitutedDict[@"username"] = adsid;
-            substitutedDict[@"password"] = pet;
+            [substitutedDict setObject:adsid forKey:@"username"];
+            [substitutedDict setObject:pet forKey:@"password"];
             NSData *substituted = [NSPropertyListSerialization dataWithPropertyList:substitutedDict format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
 
             NSString *urlStr = isIMFT ? @"https://profile.ess.apple.com/WebObjects/VCProfileService.woa/wa/authenticateUser" : @"https://profile.gc.apple.com/WebObjects/GKProfileService.woa/wa/authenticateUser";
@@ -1557,8 +1560,8 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
             }
 
             NSMutableDictionary *outHeaders = [NSMutableDictionary dictionary];
-            if (httpResponse.allHeaderFields[@"Content-Type"]) outHeaders[@"Content-Type"] = httpResponse.allHeaderFields[@"Content-Type"];
-            if (httpResponse.allHeaderFields[@"Content-Encoding"]) outHeaders[@"Content-Encoding"] = httpResponse.allHeaderFields[@"Content-Encoding"];
+            if ([[httpResponse allHeaderFields] objectForKey:@"Content-Type"]) [outHeaders setObject:[[httpResponse allHeaderFields] objectForKey:@"Content-Type"] forKey:@"Content-Type"];
+            if ([[httpResponse allHeaderFields] objectForKey:@"Content-Encoding"]) [outHeaders setObject:[[httpResponse allHeaderFields] objectForKey:@"Content-Encoding"] forKey:@"Content-Encoding"];
 
             NSHTTPURLResponse *okResponse = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:httpResponse.statusCode HTTPVersion:@"HTTP/1.1" headerFields:outHeaders];
             [self.client URLProtocol:self didReceiveResponse:okResponse cacheStoragePolicy:NSURLCacheStorageNotAllowed];
@@ -1569,10 +1572,10 @@ static NSMutableURLRequest *buildForwardedRequest(NSURL *url, NSString *method, 
 
         if (isFMIPInit) {
             NSMutableDictionary *bodyDict = [[NSJSONSerialization JSONObjectWithData:originalBody options:0 error:nil] mutableCopy];
-            NSMutableDictionary *clientContext = [bodyDict[@"clientContext"] mutableCopy];
-            clientContext[@"osVersion"] = @"9.0";
-            clientContext[@"appVersion"] = @"5.0";
-            bodyDict[@"clientContext"] = clientContext;
+            NSMutableDictionary *clientContext = [[bodyDict objectForKey:@"clientContext"] mutableCopy];
+            [clientContext setObject:@"9.0" forKey:@"osVersion"];
+            [clientContext setObject:@"5.0" forKey:@"appVersion"];
+            [bodyDict setObject:clientContext forKey:@"clientContext"];
             NSData *rewrittenBody = [NSJSONSerialization dataWithJSONObject:bodyDict options:0 error:nil];
 
             NSString *identityFMIP = base64_encode([[NSString stringWithFormat:@"%@:%@", adsid, pet] dataUsingEncoding:NSUTF8StringEncoding]);
@@ -1665,9 +1668,9 @@ static BOOL isGSAPortAccountsSessionRequest(NSURLRequest *request) {
         return;
     }
     objc_setAssociatedObject(self, &gsaportSessionTaskContextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    NSURLRequest *request = context[@"request"];
-    void (^completion)(NSData *, NSURLResponse *, NSError *) = context[@"completion"];
-    NSURLSession *session = context[@"session"];
+    NSURLRequest *request = [context objectForKey:@"request"];
+    void (^completion)(NSData *, NSURLResponse *, NSError *) = [context objectForKey:@"completion"];
+    NSURLSession *session = [context objectForKey:@"session"];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSURLResponse *response = nil;
         NSError *error = nil;
